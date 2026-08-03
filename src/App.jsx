@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 const NAV_ITEMS = [
   'Dashboard',
@@ -7,6 +7,9 @@ const NAV_ITEMS = [
   'Payments',
   'Settings',
 ]
+
+const STORAGE_KEY = 'noluforge-dashboard-projects-v1'
+const DEFAULT_DEPOSIT_PERCENT = 30
 
 const STATUS_ORDER = [
   'Concept / In Progress',
@@ -33,7 +36,9 @@ const SAMPLE_PROJECTS = [
     projectType: 'Luxury Brochure Site',
     previewLink: 'https://preview.noluforge.co.za/maboneng-spa',
     status: 'Ready for Review',
-    invoiceAmount: 9500,
+    quoteAmount: 9500,
+    progress: 72,
+    amountPaid: 3500,
     lastOutreach: '2026-08-01',
   },
   {
@@ -43,7 +48,9 @@ const SAMPLE_PROJECTS = [
     projectType: 'Service Booking Website',
     previewLink: 'https://preview.noluforge.co.za/soweto-auto',
     status: 'Concept / In Progress',
-    invoiceAmount: 8400,
+    quoteAmount: 8400,
+    progress: 32,
+    amountPaid: 0,
     lastOutreach: '2026-07-31',
   },
   {
@@ -53,7 +60,9 @@ const SAMPLE_PROJECTS = [
     projectType: 'Catalog and Order Enquiry',
     previewLink: 'https://preview.noluforge.co.za/rosebank-bakery',
     status: 'Awaiting Payment',
-    invoiceAmount: 7800,
+    quoteAmount: 7800,
+    progress: 92,
+    amountPaid: 2340,
     lastOutreach: '2026-07-29',
   },
   {
@@ -63,7 +72,9 @@ const SAMPLE_PROJECTS = [
     projectType: 'Portfolio and Lead Capture',
     previewLink: 'https://preview.noluforge.co.za/linden-property',
     status: 'Paid',
-    invoiceAmount: 13200,
+    quoteAmount: 13200,
+    progress: 100,
+    amountPaid: 13200,
     lastOutreach: '2026-07-25',
   },
 ]
@@ -73,7 +84,33 @@ const INITIAL_FORM = {
   contactInfo: '',
   projectType: '',
   previewLink: '',
-  invoiceAmount: '',
+  quoteAmount: '',
+  amountPaid: '',
+}
+
+function getDepositRequired(project, depositPercent) {
+  return Math.round(project.quoteAmount * (depositPercent / 100))
+}
+
+function getPaymentHealth(project, depositPercent) {
+  const depositRequired = getDepositRequired(project, depositPercent)
+
+  if (project.amountPaid >= project.quoteAmount) {
+    return 'paid'
+  }
+
+  if (project.amountPaid >= depositRequired) {
+    return 'deposit-cleared'
+  }
+
+  return 'deposit-due'
+}
+
+function getProgressFromStatus(status) {
+  if (status === 'Concept / In Progress') return 35
+  if (status === 'Ready for Review') return 75
+  if (status === 'Awaiting Payment') return 92
+  return 100
 }
 
 function formatCurrency(value) {
@@ -86,10 +123,22 @@ function formatCurrency(value) {
 
 function App() {
   const [activeSection, setActiveSection] = useState('Dashboard')
-  const [projects, setProjects] = useState(SAMPLE_PROJECTS)
+  const [projects, setProjects] = useState(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY)
+      return saved ? JSON.parse(saved) : SAMPLE_PROJECTS
+    } catch {
+      return SAMPLE_PROJECTS
+    }
+  })
   const [showAddModal, setShowAddModal] = useState(false)
   const [formData, setFormData] = useState(INITIAL_FORM)
   const [paymentFilter, setPaymentFilter] = useState('all')
+  const [depositPercent, setDepositPercent] = useState(DEFAULT_DEPOSIT_PERCENT)
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(projects))
+  }, [projects])
 
   const metrics = useMemo(() => {
     const totalProjects = projects.length
@@ -102,45 +151,84 @@ function App() {
     const completedAndPaid = projects.filter(
       (project) => project.status === 'Paid',
     ).length
+    const depositsCleared = projects.filter(
+      (project) => getPaymentHealth(project, depositPercent) !== 'deposit-due',
+    ).length
+    const avgProgress =
+      totalProjects === 0
+        ? 0
+        : Math.round(
+            projects.reduce((sum, project) => sum + (project.progress || 0), 0) /
+              totalProjects,
+          )
 
     return {
       totalProjects,
       activeBuilds,
       pendingReview,
       completedAndPaid,
+      depositsCleared,
+      avgProgress,
     }
-  }, [projects])
+  }, [projects, depositPercent])
 
   const financials = useMemo(() => {
     const potentialRevenue = projects.reduce(
-      (total, project) => total + project.invoiceAmount,
+      (total, project) => total + project.quoteAmount,
       0,
     )
-    const collectedRevenue = projects
-      .filter((project) => project.status === 'Paid')
-      .reduce((total, project) => total + project.invoiceAmount, 0)
+    const collectedRevenue = projects.reduce(
+      (total, project) => total + project.amountPaid,
+      0,
+    )
 
-    const pendingRevenue = potentialRevenue - collectedRevenue
+    const pendingRevenue = Math.max(potentialRevenue - collectedRevenue, 0)
+    const depositTarget = projects.reduce(
+      (total, project) => total + getDepositRequired(project, depositPercent),
+      0,
+    )
+    const depositsCollected = projects.reduce(
+      (total, project) =>
+        total + Math.min(project.amountPaid, getDepositRequired(project, depositPercent)),
+      0,
+    )
 
-    return { potentialRevenue, collectedRevenue, pendingRevenue }
-  }, [projects])
+    const unpaidCount = projects.filter(
+      (project) => project.amountPaid < project.quoteAmount,
+    ).length
+
+    return {
+      potentialRevenue,
+      collectedRevenue,
+      pendingRevenue,
+      depositTarget,
+      depositsCollected,
+      unpaidCount,
+    }
+  }, [projects, depositPercent])
 
   const filteredProjects = useMemo(() => {
     if (paymentFilter === 'unpaid') {
-      return projects.filter((project) => project.status !== 'Paid')
+      return projects.filter((project) => project.amountPaid < project.quoteAmount)
     }
 
     if (paymentFilter === 'awaiting') {
       return projects.filter((project) => project.status === 'Awaiting Payment')
     }
 
+    if (paymentFilter === 'depositDue') {
+      return projects.filter(
+        (project) => getPaymentHealth(project, depositPercent) === 'deposit-due',
+      )
+    }
+
     return projects
-  }, [projects, paymentFilter])
+  }, [projects, paymentFilter, depositPercent])
 
   const outreachQueue = useMemo(
     () =>
       projects
-        .filter((project) => project.status !== 'Paid')
+        .filter((project) => project.amountPaid < project.quoteAmount)
         .sort(
           (a, b) =>
             new Date(a.lastOutreach).getTime() - new Date(b.lastOutreach).getTime(),
@@ -156,6 +244,9 @@ function App() {
           ? {
               ...project,
               status: nextStatus,
+              progress: Math.max(project.progress, getProgressFromStatus(nextStatus)),
+              amountPaid:
+                nextStatus === 'Paid' ? project.quoteAmount : project.amountPaid,
               lastOutreach: new Date().toISOString().slice(0, 10),
             }
           : project,
@@ -172,13 +263,71 @@ function App() {
 
         const currentIndex = STATUS_ORDER.indexOf(project.status)
         const nextIndex = Math.min(currentIndex + 1, STATUS_ORDER.length - 1)
+        const nextStatus = STATUS_ORDER[nextIndex]
 
         return {
           ...project,
-          status: STATUS_ORDER[nextIndex],
+          status: nextStatus,
+          progress: Math.max(project.progress, getProgressFromStatus(nextStatus)),
+          amountPaid: nextStatus === 'Paid' ? project.quoteAmount : project.amountPaid,
           lastOutreach: new Date().toISOString().slice(0, 10),
         }
       }),
+    )
+  }
+
+  function updateProgress(projectId, step) {
+    setProjects((currentProjects) =>
+      currentProjects.map((project) => {
+        if (project.id !== projectId) return project
+        const nextProgress = Math.max(0, Math.min(project.progress + step, 100))
+        return {
+          ...project,
+          progress: nextProgress,
+          status: nextProgress === 100 ? 'Paid' : project.status,
+        }
+      }),
+    )
+  }
+
+  function markClientContacted(projectId) {
+    setProjects((currentProjects) =>
+      currentProjects.map((project) =>
+        project.id === projectId
+          ? { ...project, lastOutreach: new Date().toISOString().slice(0, 10) }
+          : project,
+      ),
+    )
+  }
+
+  function recordDeposit(projectId) {
+    setProjects((currentProjects) =>
+      currentProjects.map((project) => {
+        if (project.id !== projectId) return project
+        const depositRequired = getDepositRequired(project, depositPercent)
+        return {
+          ...project,
+          amountPaid: Math.max(project.amountPaid, depositRequired),
+          progress: Math.max(project.progress, 25),
+          lastOutreach: new Date().toISOString().slice(0, 10),
+        }
+      }),
+    )
+  }
+
+  function recordFinalPayment(projectId) {
+    setProjects((currentProjects) =>
+      currentProjects.map((project) =>
+        project.id === projectId
+          ? {
+              ...project,
+              amountPaid: project.quoteAmount,
+              status: 'Paid',
+              progress: 100,
+              lastOutreach: new Date().toISOString().slice(0, 10),
+            }
+          : project,
+      ),
     )
   }
 
@@ -197,7 +346,9 @@ function App() {
       projectType: formData.projectType,
       previewLink: formData.previewLink,
       status: 'Concept / In Progress',
-      invoiceAmount: Number(formData.invoiceAmount) || 0,
+      quoteAmount: Number(formData.quoteAmount) || 0,
+      amountPaid: Number(formData.amountPaid) || 0,
+      progress: 0,
       lastOutreach: new Date().toISOString().slice(0, 10),
     }
 
@@ -205,6 +356,16 @@ function App() {
     setFormData(INITIAL_FORM)
     setShowAddModal(false)
   }
+
+  const pageTitle =
+    activeSection === 'Dashboard'
+      ? 'Noluforge Tracking Dashboard'
+      : `${activeSection} Workspace`
+
+  const pageSummary =
+    activeSection === 'Dashboard'
+      ? 'Manage redesign builds, outreach touches, and payment progress in one command center.'
+      : 'Use this section to keep operations focused and remove admin friction from delivery.'
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 selection:bg-[#c5a880] selection:text-zinc-950">
@@ -251,11 +412,10 @@ function App() {
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
                 <h1 className="font-display text-2xl text-white md:text-3xl">
-                  Noluforge Tracking Dashboard
+                  {pageTitle}
                 </h1>
                 <p className="mt-2 text-sm text-zinc-400">
-                  Manage redesign builds, outreach touches, and payment progress in
-                  one command center.
+                  {pageSummary}
                 </p>
               </div>
               <button
@@ -268,7 +428,7 @@ function App() {
             </div>
           </section>
 
-          <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
             <article className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
               <p className="text-xs uppercase tracking-wide text-zinc-500">Pipeline</p>
               <p className="mt-2 text-3xl font-semibold text-white">
@@ -303,15 +463,33 @@ function App() {
               </p>
               <p className="mt-1 text-sm text-zinc-400">Closed projects</p>
             </article>
+            <article className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+              <p className="text-xs uppercase tracking-wide text-zinc-500">
+                Deposit Cleared
+              </p>
+              <p className="mt-2 text-3xl font-semibold text-[#d8be90]">
+                {metrics.depositsCleared}
+              </p>
+              <p className="mt-1 text-sm text-zinc-400">At least 30% received</p>
+            </article>
+            <article className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+              <p className="text-xs uppercase tracking-wide text-zinc-500">
+                Avg Progress
+              </p>
+              <p className="mt-2 text-3xl font-semibold text-white">
+                {metrics.avgProgress}%
+              </p>
+              <p className="mt-1 text-sm text-zinc-400">Across all builds</p>
+            </article>
           </section>
 
-          <section className="grid gap-5 xl:grid-cols-[2fr_1fr]">
-            <article className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+          {(activeSection === 'Dashboard' || activeSection === 'Projects') && (
+            <section className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="font-display text-xl text-white">Project Pipeline</h2>
                   <p className="text-sm text-zinc-400">
-                    Business, contact, staging links, and progress status.
+                    Track execution progress, payment readiness, and delivery stage.
                   </p>
                 </div>
               </div>
@@ -321,159 +499,297 @@ function App() {
                   <thead>
                     <tr className="border-b border-zinc-800 text-xs uppercase tracking-wide text-zinc-500">
                       <th className="px-3 py-3 font-medium">Business</th>
-                      <th className="px-3 py-3 font-medium">Contact</th>
-                      <th className="px-3 py-3 font-medium">Type</th>
+                      <th className="px-3 py-3 font-medium">Progress</th>
+                      <th className="px-3 py-3 font-medium">Payment</th>
                       <th className="px-3 py-3 font-medium">Staging URL</th>
                       <th className="px-3 py-3 font-medium">Status</th>
                       <th className="px-3 py-3 font-medium">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredProjects.map((project) => (
-                      <tr
-                        key={project.id}
-                        className="border-b border-zinc-900 text-zinc-200 transition hover:bg-zinc-800/40"
-                      >
-                        <td className="px-3 py-3 font-medium text-white">
-                          {project.businessName}
-                        </td>
-                        <td className="px-3 py-3 text-zinc-300">{project.contactInfo}</td>
-                        <td className="px-3 py-3 text-zinc-300">{project.projectType}</td>
-                        <td className="px-3 py-3">
-                          <a
-                            href={project.previewLink}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-[#d8be90] underline decoration-zinc-600 underline-offset-4 transition hover:decoration-[#d8be90]"
-                          >
-                            Preview
-                          </a>
-                        </td>
-                        <td className="px-3 py-3">
-                          <span
-                            className={`inline-flex rounded-full border px-2 py-1 text-xs ${STATUS_STYLE[project.status]}`}
-                          >
-                            {project.status}
-                          </span>
-                        </td>
-                        <td className="px-3 py-3">
-                          <div className="flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              onClick={() => moveToNextStatus(project.id)}
-                              className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 transition hover:border-[#c5a880]"
+                    {projects.map((project) => {
+                      const depositRequired = getDepositRequired(project, depositPercent)
+                      const paymentHealth = getPaymentHealth(project, depositPercent)
+
+                      return (
+                        <tr
+                          key={project.id}
+                          className="border-b border-zinc-900 text-zinc-200 transition hover:bg-zinc-800/40"
+                        >
+                          <td className="px-3 py-3">
+                            <p className="font-medium text-white">{project.businessName}</p>
+                            <p className="text-xs text-zinc-400">{project.projectType}</p>
+                            <p className="text-xs text-zinc-500">{project.contactInfo}</p>
+                          </td>
+                          <td className="px-3 py-3">
+                            <p className="mb-1 text-xs text-zinc-300">{project.progress}%</p>
+                            <div className="h-2 w-44 rounded-full bg-zinc-800">
+                              <div
+                                className="h-2 rounded-full bg-gradient-to-r from-[#8f784f] to-[#d8be90]"
+                                style={{ width: `${project.progress}%` }}
+                              />
+                            </div>
+                          </td>
+                          <td className="px-3 py-3">
+                            <p className="text-xs text-zinc-300">
+                              Paid: {formatCurrency(project.amountPaid)} / {formatCurrency(project.quoteAmount)}
+                            </p>
+                            <p className="text-xs text-zinc-400">
+                              Deposit target ({depositPercent}%): {formatCurrency(depositRequired)}
+                            </p>
+                            <p
+                              className={`mt-1 inline-flex rounded-full border px-2 py-0.5 text-xs ${
+                                paymentHealth === 'paid'
+                                  ? 'border-emerald-600/60 bg-emerald-500/10 text-emerald-200'
+                                  : paymentHealth === 'deposit-cleared'
+                                    ? 'border-amber-600/60 bg-amber-500/10 text-amber-200'
+                                    : 'border-orange-600/60 bg-orange-500/10 text-orange-200'
+                              }`}
                             >
-                              Next Stage
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleStatusUpdate(project.id, 'Paid')}
-                              className="rounded-lg border border-emerald-700/70 bg-emerald-700/20 px-2 py-1 text-xs text-emerald-200 transition hover:border-emerald-500"
+                              {paymentHealth === 'paid'
+                                ? 'Fully Paid'
+                                : paymentHealth === 'deposit-cleared'
+                                  ? 'Deposit Cleared'
+                                  : 'Deposit Due'}
+                            </p>
+                          </td>
+                          <td className="px-3 py-3">
+                            <a
+                              href={project.previewLink}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-[#d8be90] underline decoration-zinc-600 underline-offset-4 transition hover:decoration-[#d8be90]"
                             >
-                              Mark Paid
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                              Preview
+                            </a>
+                          </td>
+                          <td className="px-3 py-3">
+                            <span
+                              className={`inline-flex rounded-full border px-2 py-1 text-xs ${STATUS_STYLE[project.status]}`}
+                            >
+                              {project.status}
+                            </span>
+                          </td>
+                          <td className="px-3 py-3">
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                onClick={() => updateProgress(project.id, 10)}
+                                className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 transition hover:border-[#c5a880]"
+                              >
+                                +10% Progress
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => moveToNextStatus(project.id)}
+                                className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 transition hover:border-[#c5a880]"
+                              >
+                                Next Stage
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => recordDeposit(project.id)}
+                                className="rounded-lg border border-amber-700/70 bg-amber-700/20 px-2 py-1 text-xs text-amber-200 transition hover:border-amber-500"
+                              >
+                                Record 30% Deposit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => recordFinalPayment(project.id)}
+                                className="rounded-lg border border-emerald-700/70 bg-emerald-700/20 px-2 py-1 text-xs text-emerald-200 transition hover:border-emerald-500"
+                              >
+                                Mark Fully Paid
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>
-            </article>
+            </section>
+          )}
 
-            <article className="space-y-5 rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
-              <div>
-                <h2 className="font-display text-xl text-white">Financial Overview</h2>
-                <p className="text-sm text-zinc-400">
-                  Potential vs collected and pending invoices.
-                </p>
-              </div>
+          {(activeSection === 'Dashboard' || activeSection === 'Payments') && (
+            <section className="grid gap-5 xl:grid-cols-[2fr_1fr]">
+              <article className="space-y-5 rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+                <div>
+                  <h2 className="font-display text-xl text-white">Financial Overview</h2>
+                  <p className="text-sm text-zinc-400">
+                    See cash already in and what still needs follow-up.
+                  </p>
+                </div>
 
-              <div className="grid gap-3">
-                <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3">
+                    <p className="text-xs uppercase tracking-wide text-zinc-500">
+                      Total Potential Revenue
+                    </p>
+                    <p className="mt-2 text-xl font-semibold text-white">
+                      {formatCurrency(financials.potentialRevenue)}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3">
+                    <p className="text-xs uppercase tracking-wide text-zinc-500">
+                      Collected Cash
+                    </p>
+                    <p className="mt-2 text-xl font-semibold text-[#c5a880]">
+                      {formatCurrency(financials.collectedRevenue)}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3">
+                    <p className="text-xs uppercase tracking-wide text-zinc-500">
+                      Pending Balance
+                    </p>
+                    <p className="mt-2 text-xl font-semibold text-orange-200">
+                      {formatCurrency(financials.pendingRevenue)}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3">
+                    <p className="text-xs uppercase tracking-wide text-zinc-500">
+                      Deposit Collection
+                    </p>
+                    <p className="mt-2 text-xl font-semibold text-zinc-100">
+                      {formatCurrency(financials.depositsCollected)} / {formatCurrency(financials.depositTarget)}
+                    </p>
+                  </div>
+                </div>
+
+                <div>
                   <p className="text-xs uppercase tracking-wide text-zinc-500">
-                    Total Potential Revenue
+                    Invoice Filter
                   </p>
-                  <p className="mt-2 text-xl font-semibold text-white">
-                    {formatCurrency(financials.potentialRevenue)}
-                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPaymentFilter('all')}
+                      className={`rounded-lg border px-3 py-1 text-xs transition ${
+                        paymentFilter === 'all'
+                          ? 'border-[#c5a880] bg-[#c5a880]/20 text-[#d8be90]'
+                          : 'border-zinc-700 bg-zinc-800 text-zinc-200 hover:border-zinc-600'
+                      }`}
+                    >
+                      All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPaymentFilter('depositDue')}
+                      className={`rounded-lg border px-3 py-1 text-xs transition ${
+                        paymentFilter === 'depositDue'
+                          ? 'border-[#c5a880] bg-[#c5a880]/20 text-[#d8be90]'
+                          : 'border-zinc-700 bg-zinc-800 text-zinc-200 hover:border-zinc-600'
+                      }`}
+                    >
+                      Deposit Due
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPaymentFilter('unpaid')}
+                      className={`rounded-lg border px-3 py-1 text-xs transition ${
+                        paymentFilter === 'unpaid'
+                          ? 'border-[#c5a880] bg-[#c5a880]/20 text-[#d8be90]'
+                          : 'border-zinc-700 bg-zinc-800 text-zinc-200 hover:border-zinc-600'
+                      }`}
+                    >
+                      Unpaid and Pending
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPaymentFilter('awaiting')}
+                      className={`rounded-lg border px-3 py-1 text-xs transition ${
+                        paymentFilter === 'awaiting'
+                          ? 'border-[#c5a880] bg-[#c5a880]/20 text-[#d8be90]'
+                          : 'border-zinc-700 bg-zinc-800 text-zinc-200 hover:border-zinc-600'
+                      }`}
+                    >
+                      Awaiting Payment
+                    </button>
+                  </div>
                 </div>
-                <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3">
-                  <p className="text-xs uppercase tracking-wide text-zinc-500">
-                    Collected Revenue
-                  </p>
-                  <p className="mt-2 text-xl font-semibold text-[#c5a880]">
-                    {formatCurrency(financials.collectedRevenue)}
-                  </p>
-                </div>
-                <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3">
-                  <p className="text-xs uppercase tracking-wide text-zinc-500">
-                    Pending Revenue
-                  </p>
-                  <p className="mt-2 text-xl font-semibold text-orange-200">
-                    {formatCurrency(financials.pendingRevenue)}
-                  </p>
-                </div>
-              </div>
 
-              <div>
-                <p className="text-xs uppercase tracking-wide text-zinc-500">
-                  Invoice Filter
-                </p>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setPaymentFilter('all')}
-                    className={`rounded-lg border px-3 py-1 text-xs transition ${
-                      paymentFilter === 'all'
-                        ? 'border-[#c5a880] bg-[#c5a880]/20 text-[#d8be90]'
-                        : 'border-zinc-700 bg-zinc-800 text-zinc-200 hover:border-zinc-600'
-                    }`}
-                  >
-                    All
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPaymentFilter('unpaid')}
-                    className={`rounded-lg border px-3 py-1 text-xs transition ${
-                      paymentFilter === 'unpaid'
-                        ? 'border-[#c5a880] bg-[#c5a880]/20 text-[#d8be90]'
-                        : 'border-zinc-700 bg-zinc-800 text-zinc-200 hover:border-zinc-600'
-                    }`}
-                  >
-                    Unpaid and Pending
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPaymentFilter('awaiting')}
-                    className={`rounded-lg border px-3 py-1 text-xs transition ${
-                      paymentFilter === 'awaiting'
-                        ? 'border-[#c5a880] bg-[#c5a880]/20 text-[#d8be90]'
-                        : 'border-zinc-700 bg-zinc-800 text-zinc-200 hover:border-zinc-600'
-                    }`}
-                  >
-                    Awaiting Payment
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <h3 className="text-sm font-semibold text-white">Outreach Follow-Up Queue</h3>
-                <ul className="mt-2 space-y-2 text-sm">
-                  {outreachQueue.map((project) => (
-                    <li
+                <div className="space-y-2">
+                  {filteredProjects.map((project) => (
+                    <div
                       key={project.id}
                       className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-3"
                     >
                       <p className="font-medium text-zinc-100">{project.businessName}</p>
-                      <p className="text-zinc-400">Last touch: {project.lastOutreach}</p>
-                      <p className="text-zinc-400">Status: {project.status}</p>
-                    </li>
+                      <p className="text-sm text-zinc-400">
+                        Paid {formatCurrency(project.amountPaid)} of {formatCurrency(project.quoteAmount)}
+                      </p>
+                    </div>
                   ))}
-                </ul>
+                </div>
+              </article>
+
+              <article className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+                <h3 className="text-sm font-semibold text-white">Payment Focus</h3>
+                <p className="mt-1 text-sm text-zinc-400">
+                  {financials.unpaidCount} project(s) still have an outstanding balance.
+                </p>
+                <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 text-sm text-zinc-300">
+                  Keep delivery moving by collecting the {depositPercent}% deposit early,
+                  then updating status and progress after each milestone.
+                </div>
+              </article>
+            </section>
+          )}
+
+          {(activeSection === 'Dashboard' || activeSection === 'Client Outreach') && (
+            <section className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+              <div className="mb-3">
+                <h2 className="font-display text-xl text-white">Outreach Follow-Up Queue</h2>
+                <p className="text-sm text-zinc-400">
+                  Prioritize clients who are waiting on a payment nudge or update.
+                </p>
               </div>
-            </article>
-          </section>
+              <ul className="grid gap-2 md:grid-cols-2">
+                {outreachQueue.map((project) => (
+                  <li
+                    key={project.id}
+                    className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-3"
+                  >
+                    <p className="font-medium text-zinc-100">{project.businessName}</p>
+                    <p className="text-zinc-400">Last touch: {project.lastOutreach}</p>
+                    <p className="text-zinc-400">Status: {project.status}</p>
+                    <button
+                      type="button"
+                      onClick={() => markClientContacted(project.id)}
+                      className="mt-2 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 transition hover:border-[#c5a880]"
+                    >
+                      Mark Contacted Today
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {activeSection === 'Settings' && (
+            <section className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+              <h2 className="font-display text-xl text-white">Internal Rules</h2>
+              <p className="mt-1 text-sm text-zinc-400">
+                Tune defaults to match Noluforge workflow.
+              </p>
+              <div className="mt-4 max-w-sm space-y-3">
+                <label className="grid gap-1 text-sm text-zinc-300">
+                  Default Deposit Percentage
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={depositPercent}
+                    onChange={(event) => setDepositPercent(Number(event.target.value) || 0)}
+                    className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 outline-none transition focus:border-[#c5a880]"
+                  />
+                </label>
+                <p className="text-xs text-zinc-500">
+                  This controls the deposit target shown across projects and payments.
+                </p>
+              </div>
+            </section>
+          )}
         </main>
       </div>
 
@@ -543,10 +859,22 @@ function App() {
                 <input
                   type="number"
                   min="0"
-                  name="invoiceAmount"
-                  value={formData.invoiceAmount}
+                  name="quoteAmount"
+                  value={formData.quoteAmount}
                   onChange={handleInputChange}
                   required
+                  className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 outline-none transition focus:border-[#c5a880]"
+                />
+              </label>
+              <label className="grid gap-1 text-sm text-zinc-300">
+                Amount Paid Before Start (Optional)
+                <input
+                  type="number"
+                  min="0"
+                  name="amountPaid"
+                  value={formData.amountPaid}
+                  onChange={handleInputChange}
+                  placeholder="Enter upfront deposit if received"
                   className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 outline-none transition focus:border-[#c5a880]"
                 />
               </label>
