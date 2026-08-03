@@ -10,6 +10,7 @@ const NAV_ITEMS = [
 
 const STORAGE_KEY = 'noluforge-dashboard-projects-v1'
 const DEFAULT_DEPOSIT_PERCENT = 30
+const ACTIVITY_LIMIT = 30
 
 const STATUS_ORDER = [
   'Concept / In Progress',
@@ -113,6 +114,42 @@ function getProgressFromStatus(status) {
   return 100
 }
 
+function createActivity(type, text) {
+  return {
+    id: `${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    type,
+    text,
+    timestamp: new Date().toISOString(),
+  }
+}
+
+function appendActivity(project, entry) {
+  const current = Array.isArray(project.activity) ? project.activity : []
+  return {
+    ...project,
+    activity: [entry, ...current].slice(0, ACTIVITY_LIMIT),
+  }
+}
+
+function normalizeProjects(rawProjects) {
+  if (!Array.isArray(rawProjects)) return SAMPLE_PROJECTS
+
+  return rawProjects.map((project) => ({
+    ...project,
+    quoteAmount: project.quoteAmount ?? project.invoiceAmount ?? 0,
+    amountPaid: project.amountPaid ?? 0,
+    progress: project.progress ?? getProgressFromStatus(project.status),
+    activity: Array.isArray(project.activity) ? project.activity : [],
+  }))
+}
+
+function formatDateTime(value) {
+  return new Intl.DateTimeFormat('en-ZA', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date(value))
+}
+
 function formatCurrency(value) {
   return new Intl.NumberFormat('en-ZA', {
     style: 'currency',
@@ -126,11 +163,14 @@ function App() {
   const [projects, setProjects] = useState(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY)
-      return saved ? JSON.parse(saved) : SAMPLE_PROJECTS
+      return saved ? normalizeProjects(JSON.parse(saved)) : normalizeProjects(SAMPLE_PROJECTS)
     } catch {
-      return SAMPLE_PROJECTS
+      return normalizeProjects(SAMPLE_PROJECTS)
     }
   })
+  const [selectedProjectId, setSelectedProjectId] = useState(() =>
+    SAMPLE_PROJECTS[0]?.id ?? null,
+  )
   const [showAddModal, setShowAddModal] = useState(false)
   const [formData, setFormData] = useState(INITIAL_FORM)
   const [paymentFilter, setPaymentFilter] = useState('all')
@@ -139,6 +179,17 @@ function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(projects))
   }, [projects])
+
+  useEffect(() => {
+    if (projects.length === 0) {
+      setSelectedProjectId(null)
+      return
+    }
+
+    if (!projects.some((project) => project.id === selectedProjectId)) {
+      setSelectedProjectId(projects[0].id)
+    }
+  }, [projects, selectedProjectId])
 
   const metrics = useMemo(() => {
     const totalProjects = projects.length
@@ -237,18 +288,26 @@ function App() {
     [projects],
   )
 
+  const selectedProject = useMemo(
+    () => projects.find((project) => project.id === selectedProjectId) ?? null,
+    [projects, selectedProjectId],
+  )
+
   function handleStatusUpdate(projectId, nextStatus) {
     setProjects((currentProjects) =>
       currentProjects.map((project) =>
         project.id === projectId
-          ? {
-              ...project,
-              status: nextStatus,
-              progress: Math.max(project.progress, getProgressFromStatus(nextStatus)),
-              amountPaid:
-                nextStatus === 'Paid' ? project.quoteAmount : project.amountPaid,
-              lastOutreach: new Date().toISOString().slice(0, 10),
-            }
+          ? appendActivity(
+              {
+                ...project,
+                status: nextStatus,
+                progress: Math.max(project.progress, getProgressFromStatus(nextStatus)),
+                amountPaid:
+                  nextStatus === 'Paid' ? project.quoteAmount : project.amountPaid,
+                lastOutreach: new Date().toISOString().slice(0, 10),
+              },
+              createActivity('status', `Status changed to ${nextStatus}.`),
+            )
           : project,
       ),
     )
@@ -265,13 +324,16 @@ function App() {
         const nextIndex = Math.min(currentIndex + 1, STATUS_ORDER.length - 1)
         const nextStatus = STATUS_ORDER[nextIndex]
 
-        return {
-          ...project,
-          status: nextStatus,
-          progress: Math.max(project.progress, getProgressFromStatus(nextStatus)),
-          amountPaid: nextStatus === 'Paid' ? project.quoteAmount : project.amountPaid,
-          lastOutreach: new Date().toISOString().slice(0, 10),
-        }
+        return appendActivity(
+          {
+            ...project,
+            status: nextStatus,
+            progress: Math.max(project.progress, getProgressFromStatus(nextStatus)),
+            amountPaid: nextStatus === 'Paid' ? project.quoteAmount : project.amountPaid,
+            lastOutreach: new Date().toISOString().slice(0, 10),
+          },
+          createActivity('status', `Moved to next stage: ${nextStatus}.`),
+        )
       }),
     )
   }
@@ -281,11 +343,17 @@ function App() {
       currentProjects.map((project) => {
         if (project.id !== projectId) return project
         const nextProgress = Math.max(0, Math.min(project.progress + step, 100))
-        return {
-          ...project,
-          progress: nextProgress,
-          status: nextProgress === 100 ? 'Paid' : project.status,
-        }
+        const nextStatus = nextProgress === 100 ? 'Paid' : project.status
+
+        return appendActivity(
+          {
+            ...project,
+            progress: nextProgress,
+            status: nextStatus,
+            amountPaid: nextProgress === 100 ? project.quoteAmount : project.amountPaid,
+          },
+          createActivity('progress', `Progress updated to ${nextProgress}%.`),
+        )
       }),
     )
   }
@@ -294,7 +362,10 @@ function App() {
     setProjects((currentProjects) =>
       currentProjects.map((project) =>
         project.id === projectId
-          ? { ...project, lastOutreach: new Date().toISOString().slice(0, 10) }
+          ? appendActivity(
+              { ...project, lastOutreach: new Date().toISOString().slice(0, 10) },
+              createActivity('outreach', 'Client follow-up marked as contacted today.'),
+            )
           : project,
       ),
     )
@@ -305,12 +376,20 @@ function App() {
       currentProjects.map((project) => {
         if (project.id !== projectId) return project
         const depositRequired = getDepositRequired(project, depositPercent)
-        return {
-          ...project,
-          amountPaid: Math.max(project.amountPaid, depositRequired),
-          progress: Math.max(project.progress, 25),
-          lastOutreach: new Date().toISOString().slice(0, 10),
-        }
+        const nextAmountPaid = Math.max(project.amountPaid, depositRequired)
+
+        return appendActivity(
+          {
+            ...project,
+            amountPaid: nextAmountPaid,
+            progress: Math.max(project.progress, 25),
+            lastOutreach: new Date().toISOString().slice(0, 10),
+          },
+          createActivity(
+            'payment',
+            `Deposit recorded: ${formatCurrency(nextAmountPaid)} received.`,
+          ),
+        )
       }),
     )
   }
@@ -319,13 +398,19 @@ function App() {
     setProjects((currentProjects) =>
       currentProjects.map((project) =>
         project.id === projectId
-          ? {
-              ...project,
-              amountPaid: project.quoteAmount,
-              status: 'Paid',
-              progress: 100,
-              lastOutreach: new Date().toISOString().slice(0, 10),
-            }
+          ? appendActivity(
+              {
+                ...project,
+                amountPaid: project.quoteAmount,
+                status: 'Paid',
+                progress: 100,
+                lastOutreach: new Date().toISOString().slice(0, 10),
+              },
+              createActivity(
+                'payment',
+                `Final payment received: ${formatCurrency(project.quoteAmount)} total collected.`,
+              ),
+            )
           : project,
       ),
     )
@@ -350,9 +435,29 @@ function App() {
       amountPaid: Number(formData.amountPaid) || 0,
       progress: 0,
       lastOutreach: new Date().toISOString().slice(0, 10),
+      activity: [],
     }
 
-    setProjects((currentProjects) => [newProject, ...currentProjects])
+    const createdProject = appendActivity(
+      newProject,
+      createActivity(
+        'created',
+        `Project created with quote ${formatCurrency(newProject.quoteAmount)}.`,
+      ),
+    )
+
+    if (createdProject.amountPaid > 0) {
+      createdProject.activity = [
+        createActivity(
+          'payment',
+          `Upfront payment captured: ${formatCurrency(createdProject.amountPaid)}.`,
+        ),
+        ...createdProject.activity,
+      ].slice(0, ACTIVITY_LIMIT)
+    }
+
+    setProjects((currentProjects) => [createdProject, ...currentProjects])
+    setSelectedProjectId(createdProject.id)
     setFormData(INITIAL_FORM)
     setShowAddModal(false)
   }
@@ -501,6 +606,7 @@ function App() {
                       <th className="px-3 py-3 font-medium">Business</th>
                       <th className="px-3 py-3 font-medium">Progress</th>
                       <th className="px-3 py-3 font-medium">Payment</th>
+                      <th className="px-3 py-3 font-medium">Activity</th>
                       <th className="px-3 py-3 font-medium">Staging URL</th>
                       <th className="px-3 py-3 font-medium">Status</th>
                       <th className="px-3 py-3 font-medium">Actions</th>
@@ -553,6 +659,19 @@ function App() {
                                   : 'Deposit Due'}
                             </p>
                           </td>
+                            <td className="px-3 py-3">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedProjectId(project.id)}
+                                className={`rounded-lg border px-2 py-1 text-xs transition ${
+                                  selectedProjectId === project.id
+                                    ? 'border-[#c5a880] bg-[#c5a880]/15 text-[#d8be90]'
+                                    : 'border-zinc-700 bg-zinc-800 text-zinc-200 hover:border-zinc-600'
+                                }`}
+                              >
+                                View Timeline
+                              </button>
+                            </td>
                           <td className="px-3 py-3">
                             <a
                               href={project.previewLink}
@@ -607,6 +726,42 @@ function App() {
                     })}
                   </tbody>
                 </table>
+              </div>
+
+              <div className="mt-4 rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <h3 className="text-sm font-semibold text-white">Project Activity Timeline</h3>
+                  {selectedProject ? (
+                    <p className="text-xs text-zinc-400">
+                      {selectedProject.businessName}
+                    </p>
+                  ) : null}
+                </div>
+
+                {selectedProject && selectedProject.activity.length > 0 ? (
+                  <ul className="space-y-2">
+                    {selectedProject.activity.map((item) => (
+                      <li
+                        key={item.id}
+                        className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-3"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[11px] uppercase tracking-wide text-zinc-300">
+                            {item.type}
+                          </span>
+                          <span className="text-xs text-zinc-500">
+                            {formatDateTime(item.timestamp)}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-sm text-zinc-200">{item.text}</p>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-zinc-400">
+                    No timeline events yet for this project. Trigger any action to start the log.
+                  </p>
+                )}
               </div>
             </section>
           )}
