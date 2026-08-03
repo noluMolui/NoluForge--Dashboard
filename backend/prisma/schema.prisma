@@ -1,0 +1,89 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProjectStatus {
+  CONCEPT_IN_PROGRESS
+  READY_FOR_REVIEW
+  AWAITING_PAYMENT
+  PAID
+}
+
+enum PaymentKind {
+  DEPOSIT
+  MILESTONE
+  FINAL
+}
+
+model User {
+  id           Int            @id @default(autoincrement())
+  email        String         @unique
+  passwordHash String
+  fullName     String
+  role         String         @default("owner")
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  events       ProjectEvent[]
+}
+
+model Project {
+  id             Int           @id @default(autoincrement())
+  businessName   String
+  contactInfo    String
+  projectType    String
+  previewLink    String
+  status         ProjectStatus @default(CONCEPT_IN_PROGRESS)
+  quoteAmount    Int
+  amountPaid     Int           @default(0)
+  progress       Int           @default(0)
+  depositPercent Int           @default(30)
+  lastOutreach   DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  events         ProjectEvent[]
+  payments       Payment[]
+  outreachLogs   OutreachLog[]
+}
+
+model ProjectEvent {
+  id         Int      @id @default(autoincrement())
+  projectId  Int
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  eventType  String
+  message    String
+  metadata   Json?
+  createdBy  Int?
+  createdByUser User? @relation(fields: [createdBy], references: [id])
+  createdAt  DateTime @default(now())
+
+  @@index([projectId, createdAt])
+}
+
+model Payment {
+  id         Int         @id @default(autoincrement())
+  projectId  Int
+  project    Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  kind       PaymentKind
+  amount     Int
+  paidAt     DateTime    @default(now())
+  reference  String?
+  createdAt  DateTime    @default(now())
+
+  @@index([projectId, paidAt])
+}
+
+model OutreachLog {
+  id         Int      @id @default(autoincrement())
+  projectId  Int
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  note       String?
+  contactedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  @@index([projectId, contactedAt])
+}

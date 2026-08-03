@@ -11,6 +11,7 @@ const NAV_ITEMS = [
 const STORAGE_KEY = 'noluforge-dashboard-projects-v1'
 const DEFAULT_DEPOSIT_PERCENT = 30
 const ACTIVITY_LIMIT = 30
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000/api'
 
 const STATUS_ORDER = [
   'Concept / In Progress',
@@ -150,6 +151,22 @@ function formatDateTime(value) {
   }).format(new Date(value))
 }
 
+async function apiRequest(path, options = {}) {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
+    ...options,
+  })
+
+  if (!response.ok) {
+    throw new Error(`API request failed: ${response.status}`)
+  }
+
+  return response.json()
+}
+
 function formatCurrency(value) {
   return new Intl.NumberFormat('en-ZA', {
     style: 'currency',
@@ -175,10 +192,28 @@ function App() {
   const [formData, setFormData] = useState(INITIAL_FORM)
   const [paymentFilter, setPaymentFilter] = useState('all')
   const [depositPercent, setDepositPercent] = useState(DEFAULT_DEPOSIT_PERCENT)
+  const [backendStatus, setBackendStatus] = useState('checking')
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(projects))
   }, [projects])
+
+  useEffect(() => {
+    async function loadFromBackend() {
+      try {
+        const payload = await apiRequest('/projects')
+        if (Array.isArray(payload.data) && payload.data.length > 0) {
+          setProjects(normalizeProjects(payload.data))
+          setSelectedProjectId(payload.data[0].id)
+        }
+        setBackendStatus('connected')
+      } catch {
+        setBackendStatus('offline')
+      }
+    }
+
+    loadFromBackend()
+  }, [])
 
   useEffect(() => {
     if (projects.length === 0) {
@@ -293,7 +328,93 @@ function App() {
     [projects, selectedProjectId],
   )
 
+  function upsertProjectFromApi(apiProject) {
+    const normalized = normalizeProjects([apiProject])[0]
+    setProjects((currentProjects) => {
+      const existingIndex = currentProjects.findIndex(
+        (project) => project.id === normalized.id,
+      )
+
+      if (existingIndex === -1) {
+        return [normalized, ...currentProjects]
+      }
+
+      const clone = [...currentProjects]
+      clone[existingIndex] = normalized
+      return clone
+    })
+  }
+
+  async function syncProjectPatch(projectId, patch) {
+    if (backendStatus !== 'connected') return
+
+    try {
+      const payload = await apiRequest(`/projects/${projectId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      })
+      upsertProjectFromApi(payload.data)
+    } catch {
+      setBackendStatus('offline')
+    }
+  }
+
+  async function syncProjectEvent(projectId, eventType, message, metadata) {
+    if (backendStatus !== 'connected') return
+
+    try {
+      await apiRequest(`/projects/${projectId}/events`, {
+        method: 'POST',
+        body: JSON.stringify({
+          eventType,
+          message,
+          metadata,
+        }),
+      })
+    } catch {
+      setBackendStatus('offline')
+    }
+  }
+
+  async function syncProjectPayment(projectId, kind, amount, reference) {
+    if (backendStatus !== 'connected') return
+
+    try {
+      const payload = await apiRequest(`/projects/${projectId}/payments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          kind,
+          amount,
+          reference,
+        }),
+      })
+      upsertProjectFromApi(payload.data)
+    } catch {
+      setBackendStatus('offline')
+    }
+  }
+
+  async function syncOutreach(projectId, note) {
+    if (backendStatus !== 'connected') return
+
+    try {
+      const payload = await apiRequest(`/projects/${projectId}/outreach`, {
+        method: 'POST',
+        body: JSON.stringify({ note }),
+      })
+      upsertProjectFromApi(payload.data)
+    } catch {
+      setBackendStatus('offline')
+    }
+  }
+
   function handleStatusUpdate(projectId, nextStatus) {
+    const project = projects.find((item) => item.id === projectId)
+    if (!project) return
+
+    const nextProgress = Math.max(project.progress, getProgressFromStatus(nextStatus))
+    const nextAmountPaid = nextStatus === 'Paid' ? project.quoteAmount : project.amountPaid
+
     setProjects((currentProjects) =>
       currentProjects.map((project) =>
         project.id === projectId
@@ -301,9 +422,8 @@ function App() {
               {
                 ...project,
                 status: nextStatus,
-                progress: Math.max(project.progress, getProgressFromStatus(nextStatus)),
-                amountPaid:
-                  nextStatus === 'Paid' ? project.quoteAmount : project.amountPaid,
+                progress: nextProgress,
+                amountPaid: nextAmountPaid,
                 lastOutreach: new Date().toISOString().slice(0, 10),
               },
               createActivity('status', `Status changed to ${nextStatus}.`),
@@ -311,51 +431,90 @@ function App() {
           : project,
       ),
     )
+
+    syncProjectPatch(projectId, {
+      status: nextStatus,
+      progress: nextProgress,
+      amountPaid: nextAmountPaid,
+      lastOutreach: new Date().toISOString(),
+    })
+    syncProjectEvent(projectId, 'status', `Status changed to ${nextStatus}.`, {
+      status: nextStatus,
+    })
   }
 
   function moveToNextStatus(projectId) {
+    const project = projects.find((item) => item.id === projectId)
+    if (!project) return
+
+    const currentIndex = STATUS_ORDER.indexOf(project.status)
+    const nextIndex = Math.min(currentIndex + 1, STATUS_ORDER.length - 1)
+    const nextStatus = STATUS_ORDER[nextIndex]
+    const nextProgress = Math.max(project.progress, getProgressFromStatus(nextStatus))
+    const nextAmountPaid = nextStatus === 'Paid' ? project.quoteAmount : project.amountPaid
+
     setProjects((currentProjects) =>
       currentProjects.map((project) => {
         if (project.id !== projectId) {
           return project
         }
 
-        const currentIndex = STATUS_ORDER.indexOf(project.status)
-        const nextIndex = Math.min(currentIndex + 1, STATUS_ORDER.length - 1)
-        const nextStatus = STATUS_ORDER[nextIndex]
-
         return appendActivity(
           {
             ...project,
             status: nextStatus,
-            progress: Math.max(project.progress, getProgressFromStatus(nextStatus)),
-            amountPaid: nextStatus === 'Paid' ? project.quoteAmount : project.amountPaid,
+            progress: nextProgress,
+            amountPaid: nextAmountPaid,
             lastOutreach: new Date().toISOString().slice(0, 10),
           },
           createActivity('status', `Moved to next stage: ${nextStatus}.`),
         )
       }),
     )
+
+    syncProjectPatch(projectId, {
+      status: nextStatus,
+      progress: nextProgress,
+      amountPaid: nextAmountPaid,
+      lastOutreach: new Date().toISOString(),
+    })
+    syncProjectEvent(projectId, 'status', `Moved to next stage: ${nextStatus}.`, {
+      status: nextStatus,
+    })
   }
 
   function updateProgress(projectId, step) {
+    const project = projects.find((item) => item.id === projectId)
+    if (!project) return
+
+    const nextProgress = Math.max(0, Math.min(project.progress + step, 100))
+    const nextStatus = nextProgress === 100 ? 'Paid' : project.status
+    const nextAmountPaid = nextProgress === 100 ? project.quoteAmount : project.amountPaid
+
     setProjects((currentProjects) =>
       currentProjects.map((project) => {
         if (project.id !== projectId) return project
-        const nextProgress = Math.max(0, Math.min(project.progress + step, 100))
-        const nextStatus = nextProgress === 100 ? 'Paid' : project.status
 
         return appendActivity(
           {
             ...project,
             progress: nextProgress,
             status: nextStatus,
-            amountPaid: nextProgress === 100 ? project.quoteAmount : project.amountPaid,
+            amountPaid: nextAmountPaid,
           },
           createActivity('progress', `Progress updated to ${nextProgress}%.`),
         )
       }),
     )
+
+    syncProjectPatch(projectId, {
+      progress: nextProgress,
+      status: nextStatus,
+      amountPaid: nextAmountPaid,
+    })
+    syncProjectEvent(projectId, 'progress', `Progress updated to ${nextProgress}%.`, {
+      progress: nextProgress,
+    })
   }
 
   function markClientContacted(projectId) {
@@ -369,14 +528,23 @@ function App() {
           : project,
       ),
     )
+
+    syncProjectPatch(projectId, {
+      lastOutreach: new Date().toISOString(),
+    })
+    syncOutreach(projectId, 'Client follow-up marked as contacted today.')
   }
 
   function recordDeposit(projectId) {
+    const project = projects.find((item) => item.id === projectId)
+    if (!project) return
+    const depositRequired = getDepositRequired(project, depositPercent)
+    const nextAmountPaid = Math.max(project.amountPaid, depositRequired)
+    const delta = nextAmountPaid - project.amountPaid
+
     setProjects((currentProjects) =>
       currentProjects.map((project) => {
         if (project.id !== projectId) return project
-        const depositRequired = getDepositRequired(project, depositPercent)
-        const nextAmountPaid = Math.max(project.amountPaid, depositRequired)
 
         return appendActivity(
           {
@@ -392,9 +560,21 @@ function App() {
         )
       }),
     )
+
+    if (delta > 0) {
+      syncProjectPayment(projectId, 'DEPOSIT', delta, 'Deposit capture')
+    } else {
+      syncProjectEvent(projectId, 'payment', 'Deposit already met for this project.', {
+        depositRequired,
+      })
+    }
   }
 
   function recordFinalPayment(projectId) {
+    const project = projects.find((item) => item.id === projectId)
+    if (!project) return
+    const delta = Math.max(project.quoteAmount - project.amountPaid, 0)
+
     setProjects((currentProjects) =>
       currentProjects.map((project) =>
         project.id === projectId
@@ -414,6 +594,16 @@ function App() {
           : project,
       ),
     )
+
+    if (delta > 0) {
+      syncProjectPayment(projectId, 'FINAL', delta, 'Final settlement')
+    } else {
+      syncProjectPatch(projectId, {
+        amountPaid: project.quoteAmount,
+        status: 'Paid',
+        progress: 100,
+      })
+    }
   }
 
   function handleInputChange(event) {
@@ -421,8 +611,36 @@ function App() {
     setFormData((current) => ({ ...current, [name]: value }))
   }
 
-  function handleAddProject(event) {
+  async function handleAddProject(event) {
     event.preventDefault()
+
+    if (backendStatus === 'connected') {
+      try {
+        const payload = await apiRequest('/projects', {
+          method: 'POST',
+          body: JSON.stringify({
+            businessName: formData.businessName,
+            contactInfo: formData.contactInfo,
+            projectType: formData.projectType,
+            previewLink: formData.previewLink,
+            status: 'Concept / In Progress',
+            quoteAmount: Number(formData.quoteAmount) || 0,
+            amountPaid: Number(formData.amountPaid) || 0,
+            progress: 0,
+            lastOutreach: new Date().toISOString(),
+            depositPercent,
+          }),
+        })
+
+        upsertProjectFromApi(payload.data)
+        setSelectedProjectId(payload.data.id)
+        setFormData(INITIAL_FORM)
+        setShowAddModal(false)
+        return
+      } catch {
+        setBackendStatus('offline')
+      }
+    }
 
     const newProject = {
       id: Date.now(),
@@ -531,6 +749,24 @@ function App() {
                 Add New Project
               </button>
             </div>
+            <div className="mt-3 flex items-center gap-2 text-xs text-zinc-400">
+              <span>Backend:</span>
+              <span
+                className={`rounded-full border px-2 py-0.5 ${
+                  backendStatus === 'connected'
+                    ? 'border-emerald-700/70 bg-emerald-500/10 text-emerald-200'
+                    : backendStatus === 'checking'
+                      ? 'border-amber-700/70 bg-amber-500/10 text-amber-200'
+                      : 'border-orange-700/70 bg-orange-500/10 text-orange-200'
+                }`}
+              >
+                {backendStatus === 'connected'
+                  ? 'Connected'
+                  : backendStatus === 'checking'
+                    ? 'Checking'
+                    : 'Offline (local mode)'}
+              </span>
+            </div>
           </section>
 
           <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
@@ -575,7 +811,9 @@ function App() {
               <p className="mt-2 text-3xl font-semibold text-[#d8be90]">
                 {metrics.depositsCleared}
               </p>
-              <p className="mt-1 text-sm text-zinc-400">At least 30% received</p>
+              <p className="mt-1 text-sm text-zinc-400">
+                At least {depositPercent}% received
+              </p>
             </article>
             <article className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
               <p className="text-xs uppercase tracking-wide text-zinc-500">
