@@ -138,6 +138,7 @@ function App() {
   const [paymentFilter, setPaymentFilter] = useState('all')
   const [depositPercent, setDepositPercent] = useState(DEFAULT_DEPOSIT_PERCENT)
   const [apiAvailable, setApiAvailable] = useState(false)
+  const [timelineForm, setTimelineForm] = useState({ type: 'note', text: '' })
   const initialLoad = useRef(false)
 
   useEffect(() => {
@@ -272,6 +273,33 @@ function App() {
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
     [projects, selectedProjectId],
   )
+
+  function handleTimelineInputChange(event) {
+    const { name, value } = event.target
+    setTimelineForm((current) => ({ ...current, [name]: value }))
+  }
+
+  function handleAddTimelineEvent(event) {
+    event.preventDefault()
+
+    if (!selectedProject || !timelineForm.text.trim()) {
+      return
+    }
+
+    const nextEntry = createActivity(timelineForm.type, timelineForm.text.trim())
+
+    setProjects((currentProjects) =>
+      currentProjects.map((project) =>
+        project.id === selectedProject.id ? appendActivity(project, nextEntry) : project,
+      ),
+    )
+
+    if (apiAvailable) {
+      api.events.add(selectedProject.id, timelineForm.type, timelineForm.text.trim()).catch(console.error)
+    }
+
+    setTimelineForm({ type: 'note', text: '' })
+  }
 
   function handleStatusUpdate(projectId, nextStatus) {
     setProjects((currentProjects) =>
@@ -796,6 +824,59 @@ function App() {
                     No timeline events yet for this project. Trigger any action to start the log.
                   </p>
                 )}
+
+                {selectedProject ? (
+                  <form
+                    onSubmit={handleAddTimelineEvent}
+                    className="mt-4 rounded-xl border border-zinc-800 bg-zinc-950/70 p-3"
+                  >
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h4 className="text-sm font-semibold text-white">Add Timeline Note</h4>
+                        <p className="text-xs text-zinc-400">
+                          Use this to log a call, update, reminder, or internal note.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-[160px_1fr_auto]">
+                      <label className="grid gap-1 text-xs text-zinc-400">
+                        Event Type
+                        <select
+                          name="type"
+                          value={timelineForm.type}
+                          onChange={handleTimelineInputChange}
+                          className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-[#c5a880]"
+                        >
+                          <option value="note">Note</option>
+                          <option value="status">Status</option>
+                          <option value="progress">Progress</option>
+                          <option value="outreach">Outreach</option>
+                          <option value="payment">Payment</option>
+                        </select>
+                      </label>
+                      <label className="grid gap-1 text-xs text-zinc-400">
+                        Timeline Text
+                        <input
+                          type="text"
+                          name="text"
+                          value={timelineForm.text}
+                          onChange={handleTimelineInputChange}
+                          placeholder="Example: Client confirmed review feedback for Friday."
+                          className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-[#c5a880]"
+                        />
+                      </label>
+                      <div className="flex items-end">
+                        <button
+                          type="submit"
+                          disabled={!timelineForm.text.trim()}
+                          className="rounded-lg border border-[#c5a880] bg-[#c5a880] px-4 py-2 text-sm font-semibold text-zinc-950 transition hover:bg-[#d8be90] disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Add Event
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                ) : null}
               </div>
             </section>
           )}
@@ -930,7 +1011,8 @@ function App() {
               <div className="mb-3">
                 <h2 className="font-display text-xl text-white">Outreach Follow-Up Queue</h2>
                 <p className="text-sm text-zinc-400">
-                  Prioritize clients who are waiting on a payment nudge or update.
+                  These are unpaid projects sorted by oldest last contact first, so you know who to
+                  call or email next.
                 </p>
               </div>
               <ul className="grid gap-2 md:grid-cols-2">
@@ -942,6 +1024,9 @@ function App() {
                     <p className="font-medium text-zinc-100">{project.businessName}</p>
                     <p className="text-zinc-400">Last touch: {project.lastOutreach}</p>
                     <p className="text-zinc-400">Status: {project.status}</p>
+                    <p className="mt-1 text-xs text-amber-200">
+                      Needs follow-up because payment is still outstanding.
+                    </p>
                     <button
                       type="button"
                       onClick={() => markClientContacted(project.id)}
